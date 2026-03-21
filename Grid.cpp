@@ -20,8 +20,11 @@ bool Grid::isBoundary(int x, int y) const {
 
 void Grid::setType(int x, int y, CellType t) {
     if (!inBounds(x, y)) return;
+
+    // exits and entrances only allowed on boundary
     if ((t == CellType::EXIT || t == CellType::ENTRANCE) && !isBoundary(x, y))
         return;
+
     get(x, y).type = t;
 }
 

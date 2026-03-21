@@ -4,8 +4,8 @@
 enum class Behavior { CALM, PANIC };
 
 struct Agent {
-    float x, y;
-    float speed;
+    float x, y;           // position in grid cells
+    float speed;          // cells per tick
     Behavior behavior;
     bool reachedExit = false;
 
