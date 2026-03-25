@@ -2,10 +2,25 @@
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <vector>
+#include <string>
 #include "Config.h"
 #include "Grid.h"
 #include "Agent.h"
 #include "FlowField.h"
+#include "AStar.h"
+
+// find nearest exit on grid
+std::pair<int,int> findNearestExit(const Grid& grid, int sx, int sy) {
+    int bestX = -1, bestY = -1;
+    float bestDist = 1e9f;
+    for (int y = 0; y < grid.height; y++)
+        for (int x = 0; x < grid.width; x++)
+            if (grid.get(x, y).type == CellType::EXIT) {
+                float d = sqrtf((float)((x-sx)*(x-sx)+(y-sy)*(y-sy)));
+                if (d < bestDist) { bestDist = d; bestX = x; bestY = y; }
+            }
+    return {bestX, bestY};
+}
 
 SDL_Color densityColor(float d) {
     d = std::min(1.0f, std::max(0.0f, d));
@@ -34,7 +49,6 @@ void renderGrid(SDL_Renderer* ren, const Grid& grid) {
                     SDL_SetRenderDrawColor(ren, 168, 200, 240, 255); break;
             }
             SDL_RenderFillRect(ren, &rect);
-
             if (c.type == CellType::EMPTY && c.density > 0.05f) {
                 SDL_Color dc = densityColor(c.density);
                 SDL_SetRenderDrawColor(ren, dc.r, dc.g, dc.b, dc.a);
@@ -63,24 +77,52 @@ void renderAgents(SDL_Renderer* ren, const std::vector<Agent>& agents) {
     }
 }
 
+void computePaths(std::vector<Agent>& agents, const Grid& grid) {
+    for (auto& a : agents) {
+        if (a.reachedExit) continue;
+        int sx = (int)a.x, sy = (int)a.y;
+        auto [gx, gy] = findNearestExit(grid, sx, sy);
+        if (gx == -1) continue;
+        a.path = astar(grid, sx, sy, gx, gy, a.heuristic);
+        a.pathIndex = 0;
+    }
+}
+
 void updateAgents(std::vector<Agent>& agents, const Grid& grid, const FlowField& ff) {
     for (auto& a : agents) {
         if (a.reachedExit) continue;
-        int cx = (int)a.x;
-        int cy = (int)a.y;
+        int cx = (int)a.x, cy = (int)a.y;
+
         if (grid.inBounds(cx, cy) && grid.get(cx, cy).type == CellType::EXIT) {
             a.reachedExit = true;
             continue;
         }
-        if (grid.inBounds(cx, cy)) {
+
+        // use A* path if available
+        if (!a.path.empty() && a.pathIndex < (int)a.path.size()) {
+            auto [tx, ty] = a.path[a.pathIndex];
+            float dx = tx - a.x, dy = ty - a.y;
+            float len = sqrtf(dx*dx + dy*dy);
+            if (len < 0.2f) {
+                a.pathIndex++;
+            } else {
+                dx /= len; dy /= len;
+                float nx = a.x + dx * a.speed;
+                float ny = a.y + dy * a.speed;
+                int inx = (int)nx, iny = (int)ny;
+                if (grid.inBounds(inx, iny) && grid.get(inx, iny).type != CellType::OBSTACLE) {
+                    a.x = nx; a.y = ny;
+                }
+            }
+        } else {
+            // fallback to flow field
             float dx = ff.getDirX(cx, cy);
             float dy = ff.getDirY(cx, cy);
             float nx = a.x + dx * a.speed;
             float ny = a.y + dy * a.speed;
             int inx = (int)nx, iny = (int)ny;
             if (grid.inBounds(inx, iny) && grid.get(inx, iny).type != CellType::OBSTACLE) {
-                a.x = nx;
-                a.y = ny;
+                a.x = nx; a.y = ny;
             }
         }
     }
@@ -90,7 +132,6 @@ void updateDensity(Grid& grid, const std::vector<Agent>& agents) {
     for (int y = 0; y < grid.height; y++)
         for (int x = 0; x < grid.width; x++)
             grid.get(x, y).density *= 0.85f;
-
     for (const auto& a : agents) {
         if (a.reachedExit) continue;
         int cx = (int)a.x, cy = (int)a.y;
@@ -109,7 +150,7 @@ void updateDensity(Grid& grid, const std::vector<Agent>& agents) {
 int main() {
     SDL_Init(SDL_INIT_VIDEO);
     SDL_Window* win = SDL_CreateWindow(
-        "FLOCK",
+        "FLOCK — Crowd Evacuation Simulator",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         WINDOW_W, WINDOW_H, 0
     );
@@ -126,6 +167,9 @@ int main() {
     bool running = true;
     SDL_Event e;
 
+    // current heuristic for new agents (toggle with H key)
+    Heuristic currentHeuristic = Heuristic::EUCLIDEAN;
+
     while (running) {
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = false;
@@ -137,16 +181,27 @@ int main() {
                 if (e.key.keysym.sym == SDLK_4) mode = 3;
                 if (e.key.keysym.sym == SDLK_5) mode = 4;
                 if (e.key.keysym.sym == SDLK_6) mode = 5;
+
+                // cycle heuristic with H key
+                if (e.key.keysym.sym == SDLK_h) {
+                    int h = (int)currentHeuristic;
+                    h = (h + 1) % 6;
+                    currentHeuristic = (Heuristic)h;
+                    std::string names[] = {"MANHATTAN","EUCLIDEAN","CHEBYSHEV","DIJKSTRA","GREEDY","WEIGHTED"};
+                    SDL_SetWindowTitle(win, ("FLOCK — " + names[h]).c_str());
+                }
+
                 if (e.key.keysym.sym == SDLK_r) {
                     simRunning = !simRunning;
                     needsRecompute = true;
+                    if (simRunning) computePaths(agents, grid);
+                    SDL_SetWindowTitle(win, simRunning ? "FLOCK - RUNNING" : "FLOCK - PAUSED");
                 }
                 if (e.key.keysym.sym == SDLK_c) agents.clear();
                 if (e.key.keysym.sym == SDLK_SPACE) {
                     int mx, my;
                     SDL_GetMouseState(&mx, &my);
-                    mx /= CELL_SIZE;
-                    my /= CELL_SIZE;
+                    mx /= CELL_SIZE; my /= CELL_SIZE;
                     if (grid.inBounds(mx, my))
                         grid.setType(mx, my, CellType::EMPTY);
                     needsRecompute = true;
@@ -162,10 +217,16 @@ int main() {
                     else if (mode == 1) { grid.setType(mx, my, CellType::EXIT); needsRecompute = true; }
                     else if (mode == 2) { grid.setType(mx, my, CellType::ENTRANCE); needsRecompute = true; }
                     else if (mode == 3) { grid.setType(mx, my, CellType::EMPTY); needsRecompute = true; }
-                    else if (mode == 4 && e.type == SDL_MOUSEBUTTONDOWN)
-                        agents.push_back(Agent((float)mx, (float)my, Behavior::CALM));
-                    else if (mode == 5 && e.type == SDL_MOUSEBUTTONDOWN)
-                        agents.push_back(Agent((float)mx, (float)my, Behavior::PANIC));
+                    else if (mode == 4 && e.type == SDL_MOUSEBUTTONDOWN) {
+                        Agent a((float)mx, (float)my, Behavior::CALM);
+                        a.heuristic = currentHeuristic;
+                        agents.push_back(a);
+                    }
+                    else if (mode == 5 && e.type == SDL_MOUSEBUTTONDOWN) {
+                        Agent a((float)mx, (float)my, Behavior::PANIC);
+                        a.heuristic = Heuristic::GREEDY;
+                        agents.push_back(a);
+                    }
                 }
             }
         }
